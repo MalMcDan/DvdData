@@ -1,0 +1,162 @@
+//Delete all information out of the tables along with the function
+
+Drop Table if Exists email_campaign;
+Drop Table If Exists email_campaign_count;
+Drop Table If Exists email_campaign_detailed;
+Drop Table If Exists customer_tier_summary;
+
+Drop function if exists customer_rank;
+
+//Create function, this is necessary for the procedure to work. This Function will convert the dvd_count and assign a rank to each customer based on how many DVDs have been rented.
+
+create or replace function customer_rank(num_dvd_rented bigint) 
+returns character varying (50) 
+language plpgsql 
+As $$ 
+declare 
+begin 
+return 
+case 
+when num_dvd_rented <= 20 then 'standard' 
+when num_dvd_rented >= 21 and num_dvd_rented <= 39 then 'silver' 
+else 'gold' 
+End;
+end; $$
+
+// Create procedure. This will build all the tables I need for the email marketing campaign. I have 4 total tables. The email_capaign table gives me my joins from customer and rental table and it concatenates customer first name and last name together.
+
+The email_campaign_count turns my inventory_id into dvd_rented per customer. I have to store that in a table in order to run my function when making the next table, email_campaign_detailed
+
+The email_campaign_detailed table gives me the customer name, email, dvds_rented and the customer rank that is using a function to make the rank. 
+
+The last table, customer_tier_summary counts how many customers I have in each tier. This shows me how well the new email marketing campaign is working.
+
+Create or replace procedure create_email_campaign_tables()
+Language plpgsql
+AS $$
+Begin
+Drop Table if Exists email_campaign;
+Drop Table If Exists email_campaign_count;
+Drop Table If Exists email_campaign_detailed;
+Drop Table If Exists customer_tier_summary;
+
+Create table email_campaign As
+Select email, concat(first_name,' ', last_name) as customer_name, rental_date,  return_date, inventory_id from customer 
+inner join rental on customer.customer_id = rental.customer_id
+order by customer_name;
+
+Create table email_campaign_count As
+Select customer_name, email, count(inventory_id) as num_dvd_rented
+from email_campaign
+Where customer_name=customer_name
+Group by customer_name, email
+Order by num_dvd_rented asc;
+
+Create Table email_campaign_detailed As
+select customer_name, 
+email, num_dvd_rented, 
+customer_rank(num_dvd_rented)
+from email_campaign_count;
+
+Create Table customer_tier_summary As
+Select customer_rank, count(customer_rank) as customer_rank_count 
+from email_campaign_detailed
+Group by customer_rank;
+
+Return;
+End;
+$$;
+
+
+// Calling my tables shows that they are not created yet.
+
+Select * from email_campaign;
+Select * from email_campaign_count;
+Select * from email_campaign_detailed;
+Select * from customer_tier_summary;
+
+// Now I’m calling my procedure and my tables should be created.
+call create_email_campaign_tables();
+// How I check to see that the tables are there.
+Select * from email_campaign;
+Select * from email_campaign_count;
+Select * from email_campaign_detailed;
+Select * from customer_tier_summary;
+
+// This makes a trigger that will update my summary table when data is inserted into the email_campaign_detailed table
+
+create or replace function update_summary_trigger()
+returns trigger
+language plpgsql
+as $$
+begin
+delete from customer_tier_summary;
+insert into customer_tier_summary
+Select customer_rank, count(customer_rank) as customer_rank_count 
+from email_campaign_detailed
+Group by customer_rank;
+return new;
+end;
+$$
+
+// After the above code is made, the trigger is called using this code.
+
+create trigger customer_tier_summary_update
+After insert
+on email_campaign_detailed
+for each statement
+Execute procedure update_summary_trigger();
+
+// To test my code I’m inserting this information into the email_campaign_detailed table
+insert into email_campaign_detailed
+values ('Jane Doe', 'jane.doe@test.com', 50, 'gold');
+
+//To test that the table updated, I’m checking the summary table. I should see the count in the gold status move from 7 to 8
+Select * from customer_tier_summary;
+
+// Now I need a table to return my data back to it’s original state. This procedure will do that when it’s called.
+Create or replace procedure refresh_email_campaign_tables()
+Language plpgsql
+AS $$
+Begin
+Delete from email_campaign;
+Delete from email_campaign_count;
+Delete from email_campaign_detailed;
+Delete from customer_tier_summary;
+
+Insert into email_campaign 
+Select email, concat(first_name,' ', last_name) as customer_name, rental_date,  return_date, inventory_id from customer 
+inner join rental on customer.customer_id = rental.customer_id
+order by customer_name;
+
+Insert into email_campaign_count 
+Select customer_name, email, count(inventory_id) as num_dvd_rented
+from email_campaign
+Where customer_name=customer_name
+Group by customer_name, email
+Order by num_dvd_rented asc;
+
+Insert into email_campaign_detailed
+select customer_name, 
+email, num_dvd_rented, 
+customer_rank(num_dvd_rented)
+from email_campaign_count;
+
+insert into customer_tier_summary 
+Select customer_rank, count(customer_rank) as customer_rank_count 
+from email_campaign_detailed
+Group by customer_rank;
+
+Return;
+End;
+$$;
+
+// To test my stored procedure, I am inserting data into the email_campaign_detailed table.
+insert into email_campaign_detailed
+values('Anakin Skywalker', 'a.skywalker@ep1.com', 15, 'standard');
+
+//Now I’m calling my procedure, the two new insertions, Anakin, and Jane should be removed after this call. 
+call refresh_email_campaign_tables();
+
+//Calling the count on my email_campaign_detailed table should show that my data has been restored to its original state. I should go from 601 to 599.
+Select count(*) from email_campaign_detailed;
